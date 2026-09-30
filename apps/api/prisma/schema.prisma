@@ -1,0 +1,483 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum UserRole {
+  CITIZEN
+  AGENT
+  ADMIN
+}
+
+enum AgentVerificationStatus {
+  PENDING
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+enum RequestStatus {
+  DRAFT
+  SUBMITTED
+  PAYMENT_PENDING
+  PAYMENT_CONFIRMED
+  ASSIGNED
+  PICKED_UP
+  IN_TRANSIT_TO_AUTHORITY
+  AT_AUTHORITY
+  AUTHENTICATED
+  REJECTED_BY_AUTHORITY
+  IN_TRANSIT_TO_CITIZEN
+  DELIVERED
+  CLOSED
+  ON_HOLD
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  CONFIRMED
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum PaymentMethod {
+  CARD
+  MOBILE_WALLET
+  FAWRY_CODE
+  MEEZA
+  PAYPAL
+}
+
+enum PaymentGateway {
+  MOCK
+  PAYMOB
+  FAWRY
+  PAYPAL
+}
+
+enum DocumentUploadType {
+  ORIGINAL_DOCUMENT
+  SUPPORTING_DOCUMENT
+  PROOF_OF_CUSTODY
+  AUTHORITY_RESULT
+  DELIVERY_PROOF
+  AGENT_VERIFICATION
+  IDENTITY_DOCUMENT
+}
+
+enum NotificationType {
+  STATUS_UPDATE
+  PAYMENT
+  ASSIGNMENT
+  SYSTEM
+}
+
+enum AuthorityType {
+  EMBASSY
+  MINISTRY
+  NOTARY
+  OTHER
+}
+
+enum ShippingProvider {
+  IN_HOUSE_AGENT
+  BOSTA
+  ARAMEX
+}
+
+// ============================================================
+// USERS & AGENTS
+// ============================================================
+
+model User {
+  id            String    @id @default(uuid()) @db.Uuid
+  email         String    @unique
+  passwordHash  String    @map("password_hash")
+  phone         String?
+  role          UserRole  @default(CITIZEN)
+  firstName     String    @map("first_name")
+  lastName      String    @map("last_name")
+  // National ID — stored encrypted. The application layer handles encryption/decryption.
+  nationalId    String?   @map("national_id")
+  preferredLocale String  @default("en") @map("preferred_locale")
+  isActive      Boolean   @default(true) @map("is_active")
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  agentProfile      AgentProfile?
+  requests          Request[]          @relation("CitizenRequests")
+  assignedRequests  Request[]          @relation("AgentRequests")
+  payments          Payment[]
+  notifications     Notification[]
+  auditEvents       AuditEvent[]       @relation("AuditActor")
+  statusChanges     RequestStatusHistory[]
+  documents         Document[]
+
+  @@map("users")
+}
+
+model AgentProfile {
+  id                   String                   @id @default(uuid()) @db.Uuid
+  userId               String                   @unique @map("user_id") @db.Uuid
+  verificationStatus   AgentVerificationStatus  @default(PENDING) @map("verification_status")
+  maxConcurrent        Int                      @default(5) @map("max_concurrent")
+  currentLoad          Int                      @default(0) @map("current_load")
+  verificationNotes    String?                  @map("verification_notes")
+  approvedAt           DateTime?                @map("approved_at") @db.Timestamptz
+  createdAt            DateTime                 @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime                 @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  user                 User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  coverageAreas        AgentCoverageArea[]
+
+  @@map("agent_profiles")
+}
+
+model AgentCoverageArea {
+  id              String        @id @default(uuid()) @db.Uuid
+  agentProfileId  String        @map("agent_profile_id") @db.Uuid
+  governorateId   String        @map("governorate_id") @db.Uuid
+
+  // Relations
+  agentProfile    AgentProfile  @relation(fields: [agentProfileId], references: [id], onDelete: Cascade)
+  governorate     Governorate   @relation(fields: [governorateId], references: [id], onDelete: Cascade)
+
+  @@unique([agentProfileId, governorateId])
+  @@map("agent_coverage_areas")
+}
+
+// ============================================================
+// CONFIGURATION ENTITIES (Admin-managed)
+// ============================================================
+
+model DocumentType {
+  id                     String    @id @default(uuid()) @db.Uuid
+  name                   String
+  description            String?
+  category               String?
+  requiredUploads        Json      @default("[]") @map("required_uploads")     // e.g. ["original_document", "identity_copy"]
+  estimatedProcessingDays Int?     @map("estimated_processing_days")
+  isActive               Boolean   @default(true) @map("is_active")
+  sortOrder              Int       @default(0) @map("sort_order")
+  createdAt              DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt              DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  pricingRules           PricingRule[]
+  requests               Request[]
+  slaRules               SlaRule[]
+
+  @@map("document_types")
+}
+
+model Authority {
+  id              String        @id @default(uuid()) @db.Uuid
+  name            String
+  type            AuthorityType
+  address         String?
+  phone           String?
+  operatingHours  Json?         @map("operating_hours")  // { "sun": "09:00-14:00", "mon": "09:00-14:00", ... }
+  requirements    Json?                                   // Authority-specific requirements (JSONB)
+  isActive        Boolean       @default(true) @map("is_active")
+  sortOrder       Int           @default(0) @map("sort_order")
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime      @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  pricingRules    PricingRule[]
+  requests        Request[]
+  slaRules        SlaRule[]
+
+  @@map("authorities")
+}
+
+model Governorate {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  code      String   @unique                             // e.g. "CAI", "GIZ", "ALX"
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  agentCoverageAreas AgentCoverageArea[]
+  pricingRules       PricingRule[]
+  requestsOrigin     Request[]           @relation("OriginGovernorate")
+  requestsDestination Request[]          @relation("DestinationGovernorate")
+
+  @@map("governorates")
+}
+
+model PricingRule {
+  id              String    @id @default(uuid()) @db.Uuid
+  documentTypeId  String    @map("document_type_id") @db.Uuid
+  authorityId     String    @map("authority_id") @db.Uuid
+  governorateId   String?   @map("governorate_id") @db.Uuid        // null = applies to all governorates
+  serviceFee      Decimal   @map("service_fee") @db.Decimal(10, 2)
+  deliveryFee     Decimal   @default(0) @map("delivery_fee") @db.Decimal(10, 2)
+  expeditedFee    Decimal   @default(0) @map("expedited_fee") @db.Decimal(10, 2)
+  currency        String    @default("EGP")
+  effectiveFrom   DateTime  @map("effective_from") @db.Timestamptz
+  effectiveTo     DateTime? @map("effective_to") @db.Timestamptz   // null = no end date
+  isActive        Boolean   @default(true) @map("is_active")
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  documentType    DocumentType @relation(fields: [documentTypeId], references: [id], onDelete: Cascade)
+  authority       Authority    @relation(fields: [authorityId], references: [id], onDelete: Cascade)
+  governorate     Governorate? @relation(fields: [governorateId], references: [id], onDelete: SetNull)
+
+  @@map("pricing_rules")
+}
+
+model SlaRule {
+  id                   String   @id @default(uuid()) @db.Uuid
+  documentTypeId       String   @map("document_type_id") @db.Uuid
+  authorityId          String   @map("authority_id") @db.Uuid
+  maxProcessingHours   Int      @map("max_processing_hours")
+  alertThresholdHours  Int      @map("alert_threshold_hours")
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  documentType         DocumentType @relation(fields: [documentTypeId], references: [id], onDelete: Cascade)
+  authority            Authority    @relation(fields: [authorityId], references: [id], onDelete: Cascade)
+
+  @@unique([documentTypeId, authorityId])
+  @@map("sla_rules")
+}
+
+// ============================================================
+// CORE: REQUESTS & LIFECYCLE
+// ============================================================
+
+model Request {
+  id                   String        @id @default(uuid()) @db.Uuid
+  requestNumber        String        @unique @map("request_number")    // Human-readable: ATT-2026-000001
+  citizenId            String        @map("citizen_id") @db.Uuid
+  documentTypeId       String        @map("document_type_id") @db.Uuid
+  authorityId          String        @map("authority_id") @db.Uuid
+  originGovernorateId  String        @map("origin_governorate_id") @db.Uuid
+  destinationGovernorateId String?   @map("destination_governorate_id") @db.Uuid
+  assignedAgentId      String?       @map("assigned_agent_id") @db.Uuid
+
+  status               RequestStatus @default(DRAFT)
+
+  // Pricing snapshot (immutable once confirmed)
+  serviceFee           Decimal       @map("service_fee") @db.Decimal(10, 2)
+  deliveryFee          Decimal       @map("delivery_fee") @db.Decimal(10, 2)
+  expeditedFee         Decimal       @default(0) @map("expedited_fee") @db.Decimal(10, 2)
+  totalAmount          Decimal       @map("total_amount") @db.Decimal(10, 2)
+  currency             String        @default("EGP")
+
+  // Citizen-provided details
+  notes                String?
+  pickupAddress        String?       @map("pickup_address")
+  pickupPhone          String?       @map("pickup_phone")
+  deliveryAddress      String?       @map("delivery_address")
+  deliveryPhone        String?       @map("delivery_phone")
+  isExpedited          Boolean       @default(false) @map("is_expedited")
+
+  // Metadata
+  rejectionReason      String?       @map("rejection_reason")
+  holdReason           String?       @map("hold_reason")
+  cancellationReason   String?       @map("cancellation_reason")
+  completedAt          DateTime?     @map("completed_at") @db.Timestamptz
+  createdAt            DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime      @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  citizen              User              @relation("CitizenRequests", fields: [citizenId], references: [id])
+  assignedAgent        User?             @relation("AgentRequests", fields: [assignedAgentId], references: [id])
+  documentType         DocumentType      @relation(fields: [documentTypeId], references: [id])
+  authority            Authority         @relation(fields: [authorityId], references: [id])
+  originGovernorate    Governorate       @relation("OriginGovernorate", fields: [originGovernorateId], references: [id])
+  destinationGovernorate Governorate?    @relation("DestinationGovernorate", fields: [destinationGovernorateId], references: [id])
+  statusHistory        RequestStatusHistory[]
+  documents            Document[]
+  payments             Payment[]
+  shippingRecords      ShippingRecord[]
+
+  @@index([citizenId])
+  @@index([assignedAgentId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([requestNumber])
+  @@map("requests")
+}
+
+model RequestStatusHistory {
+  id          String        @id @default(uuid()) @db.Uuid
+  requestId   String        @map("request_id") @db.Uuid
+  fromStatus  RequestStatus? @map("from_status")
+  toStatus    RequestStatus @map("to_status")
+  changedById String        @map("changed_by_id") @db.Uuid
+  reason      String?
+  metadata    Json?                                         // proof photo URL, GPS coords, etc.
+  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz
+
+  // Relations
+  request     Request       @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  changedBy   User          @relation(fields: [changedById], references: [id])
+
+  @@index([requestId])
+  @@index([createdAt])
+  @@map("request_status_history")
+}
+
+// ============================================================
+// DOCUMENTS (File uploads)
+// ============================================================
+
+model Document {
+  id              String             @id @default(uuid()) @db.Uuid
+  requestId       String?            @map("request_id") @db.Uuid
+  uploadedById    String             @map("uploaded_by_id") @db.Uuid
+  uploadType      DocumentUploadType @map("upload_type")
+  fileName        String             @map("file_name")
+  mimeType        String             @map("mime_type")
+  fileSize        Int                @map("file_size")             // bytes
+  s3Key           String             @map("s3_key")
+  s3Bucket        String             @map("s3_bucket")
+  checksum        String?                                          // SHA-256 hash
+  description     String?
+  createdAt       DateTime           @default(now()) @map("created_at") @db.Timestamptz
+
+  // Relations
+  request         Request?           @relation(fields: [requestId], references: [id], onDelete: SetNull)
+  uploadedBy      User               @relation(fields: [uploadedById], references: [id])
+
+  @@index([requestId])
+  @@index([uploadedById])
+  @@map("documents")
+}
+
+// ============================================================
+// PAYMENTS
+// ============================================================
+
+model Payment {
+  id                   String         @id @default(uuid()) @db.Uuid
+  requestId            String         @map("request_id") @db.Uuid
+  userId               String         @map("user_id") @db.Uuid
+  gateway              PaymentGateway
+  method               PaymentMethod?
+  status               PaymentStatus  @default(PENDING)
+  amount               Decimal        @db.Decimal(10, 2)
+  currency             String         @default("EGP")
+  idempotencyKey       String         @unique @map("idempotency_key")
+  gatewayTransactionId String?        @map("gateway_transaction_id")
+  gatewayOrderId       String?        @map("gateway_order_id")
+  gatewayResponse      Json?          @map("gateway_response")       // raw response for debugging
+  refundAmount         Decimal?       @map("refund_amount") @db.Decimal(10, 2)
+  refundedAt           DateTime?      @map("refunded_at") @db.Timestamptz
+  confirmedAt          DateTime?      @map("confirmed_at") @db.Timestamptz
+  failedAt             DateTime?      @map("failed_at") @db.Timestamptz
+  failureReason        String?        @map("failure_reason")
+  metadata             Json?
+  createdAt            DateTime       @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime       @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  request              Request        @relation(fields: [requestId], references: [id])
+  user                 User           @relation(fields: [userId], references: [id])
+
+  @@index([requestId])
+  @@index([gatewayTransactionId])
+  @@index([idempotencyKey])
+  @@index([status])
+  @@map("payments")
+}
+
+// ============================================================
+// SHIPPING
+// ============================================================
+
+model ShippingRecord {
+  id                  String           @id @default(uuid()) @db.Uuid
+  requestId           String           @map("request_id") @db.Uuid
+  provider            ShippingProvider
+  providerTrackingId  String?          @map("provider_tracking_id")
+  agentId             String?          @map("agent_id") @db.Uuid        // for IN_HOUSE_AGENT
+  leg                 String           @default("pickup")                // "pickup" or "delivery"
+  status              String           @default("pending")               // provider-specific status
+  estimatedCost       Decimal?         @map("estimated_cost") @db.Decimal(10, 2)
+  actualCost          Decimal?         @map("actual_cost") @db.Decimal(10, 2)
+  currency            String           @default("EGP")
+  metadata            Json?
+  createdAt           DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt           DateTime         @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  request             Request          @relation(fields: [requestId], references: [id])
+
+  @@index([requestId])
+  @@index([providerTrackingId])
+  @@map("shipping_records")
+}
+
+// ============================================================
+// AUDIT TRAIL
+// ============================================================
+
+model AuditEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  entityType  String   @map("entity_type")             // "request", "payment", "user", "config"
+  entityId    String   @map("entity_id")
+  action      String                                    // "status_changed", "created", "updated", "deleted"
+  actorId     String   @map("actor_id") @db.Uuid
+  actorRole   UserRole @map("actor_role")
+  beforeState Json?    @map("before_state")
+  afterState  Json?    @map("after_state")
+  ipAddress   String?  @map("ip_address")
+  userAgent   String?  @map("user_agent")
+  metadata    Json?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  // Relations
+  actor       User     @relation("AuditActor", fields: [actorId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@index([createdAt])
+  @@map("audit_events")
+}
+
+// ============================================================
+// NOTIFICATIONS
+// ============================================================
+
+model Notification {
+  id        String           @id @default(uuid()) @db.Uuid
+  userId    String           @map("user_id") @db.Uuid
+  type      NotificationType
+  title     String
+  body      String
+  isRead    Boolean          @default(false) @map("is_read")
+  metadata  Json?
+  createdAt DateTime         @default(now()) @map("created_at") @db.Timestamptz
+
+  // Relations
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@index([createdAt])
+  @@map("notifications")
+}

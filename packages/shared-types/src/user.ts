@@ -5,10 +5,8 @@ export const RegisterSchema = z.object({
   password: z.string().min(8).max(100),
   firstName: z.string().min(1).max(100),
   lastName: z.string().min(1).max(100),
-  firstNameAr: z.string().min(1).max(100).optional(),
-  lastNameAr: z.string().min(1).max(100).optional(),
   phone: z.string().min(8).max(20).optional(),
-  preferredLocale: z.enum(['ar', 'en']).default('ar'),
+  preferredLocale: z.literal('en').default('en'),
 });
 
 export type RegisterDto = z.infer<typeof RegisterSchema>;
